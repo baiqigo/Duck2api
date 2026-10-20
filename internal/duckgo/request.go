@@ -2,6 +2,7 @@ package duckgo
 
 import (
 	"aurora/httpclient"
+	"aurora/httpclient/bogdanfinn"
 	duckgotypes "aurora/typings/duckgo"
 	officialtypes "aurora/typings/official"
 	"aurora/util"
@@ -24,7 +25,11 @@ import (
 
 var (
 	FEVersion = &XqdgToken{}
-	UA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+	UA        = bogdanfinn.ChromeUA
+	// bundleStack 是首页当前 entry.duckai.*.js 拼出的 meta.stack, 随 warmSession 刷新.
+	bundleStack   string
+	bundleStackMu sync.RWMutex
+	bundleRe      = regexp.MustCompile(`entry\.duckai\.[0-9a-f]+\.js`)
 )
 
 type XqdgToken struct {
@@ -70,44 +75,20 @@ func postStatus(client httpclient.AuroraHttpClient, proxyUrl string) (*http.Resp
 	return response, nil
 }
 
+// POSTconversation 在当前出口发一次; 不原地重取 token (实测重取即 418), 418/429 交给调用方换出口.
 func POSTconversation(client httpclient.AuroraHttpClient, request duckgotypes.ApiRequest, token string, proxyUrl string) (*http.Response, error) {
 	if proxyUrl != "" {
 		client.SetProxy(proxyUrl)
 	}
-
-	// 同一出口 IP 只补一次新 token; 再 418 交给调用方换出口, 原地连打只会把 IP 烧掉.
-	maxRetries := 1
-	var response *http.Response
-	var err error
-
-	for i := 0; i <= maxRetries; i++ {
-		response, err = postConversationOnce(client, request, token)
-		if err != nil {
-			return nil, err
-		}
-
-		if response.StatusCode != http.StatusTeapot && response.StatusCode != http.StatusTooManyRequests {
-			return response, nil
-		}
-
-		response.Body.Close()
-		token, err = InitXVQD(client, "")
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return response, nil
+	return postConversationOnce(client, request, token)
 }
 
 func Handle_request_error(c *gin.Context, response *http.Response) bool {
 	if response.StatusCode != 200 {
-		// Try read response body as JSON
+		// 先整体读出再解析, 否则 decode 失败后 body 已被读空
+		body, _ := io.ReadAll(response.Body)
 		var error_response map[string]interface{}
-		err := json.NewDecoder(response.Body).Decode(&error_response)
-		if err != nil {
-			// Read response body
-			body, _ := io.ReadAll(response.Body)
+		if err := json.Unmarshal(body, &error_response); err != nil {
 			c.JSON(response.StatusCode, gin.H{"error": gin.H{
 				"message": "Unknown error",
 				"type":    "internal_server_error",
@@ -135,7 +116,7 @@ func createHeader() httpclient.AuroraHeaders {
 	header.Set("content-type", "application/json")
 	header.Set("origin", "https://duck.ai")
 	header.Set("referer", "https://duck.ai/")
-	header.Set("sec-ch-ua", `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"`)
+	header.Set("sec-ch-ua", bogdanfinn.ChromeSecChUA)
 	header.Set("sec-ch-ua-mobile", "?0")
 	header.Set("sec-ch-ua-platform", `"Windows"`)
 	header.Set("sec-fetch-dest", "empty")
@@ -196,7 +177,7 @@ func warmSession(client httpclient.AuroraHttpClient) error {
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 		"accept-language":           "en-US,en;q=0.9",
 		"priority":                  "u=0, i",
-		"sec-ch-ua":                 `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"`,
+		"sec-ch-ua":                 bogdanfinn.ChromeSecChUA,
 		"sec-ch-ua-mobile":          "?0",
 		"sec-ch-ua-platform":        `"Windows"`,
 		"sec-fetch-dest":            "document",
@@ -227,6 +208,11 @@ func warmSession(client httpclient.AuroraHttpClient) error {
 	defer fe.M.Unlock()
 	fe.Token = fmt.Sprintf("%s-%s", versionTagMatch[1], versionShaMatch[1])
 	fe.ExpireAt = time.Now().Add(30 * time.Minute)
+	if bundle := bundleRe.Find(body); bundle != nil {
+		bundleStackMu.Lock()
+		bundleStack = fmt.Sprintf("Error\nat l (https://duck.ai/dist/duckai-dist/%s:2:1446307)\nat async https://duck.ai/dist/duckai-dist/%s:2:1294181", bundle, bundle)
+		bundleStackMu.Unlock()
+	}
 	return nil
 }
 
@@ -236,10 +222,12 @@ func CreateFESignals() string {
 	// request): onboarding_impression -> action -> onboarding_finish -> startNewChat_free.
 	// 模拟真实用户行为: 页面加载 -> 用户思考输入 -> 完成输入 -> 点击发送
 	// 时间间隔调整为更接近真实用户的行为模式
-	impression := 50 + randInt63n(100)              // 50-150ms (页面加载完成)
-	action := impression + 5000 + randInt63n(25000) // 5-30秒 (用户阅读并思考)
-	finish := action + 1000 + randInt63n(9000)      // 1-10秒 (输入问题)
-	startChat := finish + 10 + randInt63n(90)       // 10-100ms (点击发送按钮)
+	// 总时长要落在 warmSession 打开首页到发消息的真实间隔 (约 1-4 秒) 内,
+	// 并与 vqd.go 里 pageStart__ (1.5-4.5 秒前) 对得上; 声称停留几十秒会与首页请求时间矛盾.
+	impression := 50 + randInt63n(100)            // 50-150ms (页面加载完成)
+	action := impression + 600 + randInt63n(1400) // 0.6-2秒 (粘贴/输入)
+	finish := action + 200 + randInt63n(800)      // 0.2-1秒 (输入完成)
+	startChat := finish + 10 + randInt63n(90)     // 10-100ms (点击发送按钮)
 	end := startChat + randInt63n(10)
 	payload := map[string]interface{}{
 		"start": now - end,
@@ -378,7 +366,10 @@ func Handler(c *gin.Context, response *http.Response, oldRequest duckgotypes.Api
 				continue
 			}
 			if originalResponse.Action != "success" {
-				c.JSON(500, gin.H{"error": "Error"})
+				// 流已开始输出时响应头已发出, 再写 JSON 只会混进 SSE 流
+				if !(stream && firstTokenSet) {
+					c.JSON(500, gin.H{"error": "Error"})
+				}
 				return StreamResult{}
 			}
 			responseString := ""

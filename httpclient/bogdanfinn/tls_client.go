@@ -2,8 +2,10 @@ package bogdanfinn
 
 import (
 	"aurora/httpclient"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
@@ -22,11 +24,32 @@ func NewStdClient() *TlsClient {
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
 		tls_client.WithRandomTLSExtensionOrder(),
 		tls_client.WithTimeoutSeconds(600),
-		tls_client.WithClientProfile(profiles.Chrome_146),
+		tls_client.WithClientProfile(profiles.Chrome_152),
 	}...)
 
 	stdClient := &TlsClient{Client: client}
 	return stdClient
+}
+
+// ChromeMajor 必须与上面的 TLS profile 同一版本; UA / sec-ch-ua 都从它推出来.
+const ChromeMajor = 152
+
+// ChromeUA 是与 TLS profile 对应的 Windows Chrome UA.
+var ChromeUA = fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36", ChromeMajor)
+
+var ChromeSecChUA = secChUA(ChromeMajor)
+
+// secChUA 按 Chromium GenerateBrandVersionList 的 GREASE 规则生成 sec-ch-ua.
+func secChUA(m int) string {
+	chars := []string{" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"}
+	versions := []string{"8", "99", "24"}
+	orders := [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+	order := orders[m%6]
+	brands := make([]string, 3)
+	brands[order[0]] = fmt.Sprintf(`"Not%sA%sBrand";v="%s"`, chars[m%11], chars[(m+1)%11], versions[m%3])
+	brands[order[1]] = fmt.Sprintf(`"Chromium";v="%d"`, m)
+	brands[order[2]] = fmt.Sprintf(`"Google Chrome";v="%d"`, m)
+	return strings.Join(brands, ", ")
 }
 
 // chromeHeaderOrder 是 Chrome 发 fetch/导航请求时的头顺序; 未列出的头排在后面.

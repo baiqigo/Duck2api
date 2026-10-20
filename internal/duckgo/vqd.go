@@ -24,9 +24,8 @@ import (
 )
 
 const (
-	defaultVQDUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-	defaultVQDStack     = "Error\nat l (https://duck.ai/dist/duckai-dist/entry.duckai.c0a8c794abcbc8ee2d3c.js:2:1446307)\nat async https://duck.ai/dist/duckai-dist/entry.duckai.c0a8c794abcbc8ee2d3c.js:2:1294181"
-	defaultVQDOrigin    = "https://duck.ai"
+	defaultVQDStack  = "Error\nat l (https://duck.ai/dist/duckai-dist/entry.duckai.c0a8c794abcbc8ee2d3c.js:2:1446307)\nat async https://duck.ai/dist/duckai-dist/entry.duckai.c0a8c794abcbc8ee2d3c.js:2:1294181"
+	defaultVQDOrigin = "https://duck.ai"
 )
 
 // GenerateVQDHash 根据服务端返回的 X-Vqd-Hash-1 挑战值, 计算新的 hash 值.
@@ -65,12 +64,17 @@ func vqdUserAgent() string {
 	if v := os.Getenv("X_USER_AGENT"); v != "" {
 		return v
 	}
-	return defaultVQDUserAgent
+	return UA
 }
 
 func vqdStack() string {
 	if v := os.Getenv("X_VQD_STACK"); v != "" {
 		return v
+	}
+	bundleStackMu.RLock()
+	defer bundleStackMu.RUnlock()
+	if bundleStack != "" {
+		return bundleStack
 	}
 	return defaultVQDStack
 }

@@ -45,7 +45,7 @@ func fetchDuckDuckGoModels(proxyURL string) (openAIModelsResponse, int, error) {
 	headers.Set("accept", "application/json")
 	headers.Set("origin", "https://duck.ai")
 	headers.Set("referer", "https://duck.ai/")
-	headers.Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+	headers.Set("user-agent", bogdanfinn.ChromeUA)
 
 	response, err := client.Request(httpclient.GET, duckDuckGoModelsURL, headers, nil, nil)
 	if err != nil {

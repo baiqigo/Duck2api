@@ -244,9 +244,8 @@ func (h *Handler) startDuckDuckGoRequest(originalRequest officialtypes.APIReques
 
 	translatedRequest := duckgoConvert.ConvertAPIRequestWithOptions(originalRequest, reasoningEffort, webSearch)
 
-	// Debug: log request
-	reqJSON, _ := json.Marshal(translatedRequest)
-	log.Printf("[DEBUG] DuckDuckGo request: %s", truncateStr(string(reqJSON), 2000))
+	// 只记元数据, 不把用户提示词写进日志
+	log.Printf("[DEBUG] DuckDuckGo request: model=%s messages=%d", translatedRequest.Model, len(translatedRequest.Messages))
 
 	response, err := h.postDuckChat(translatedRequest)
 	if err != nil {
@@ -256,9 +255,9 @@ func (h *Handler) startDuckDuckGoRequest(originalRequest officialtypes.APIReques
 }
 
 // postDuckChat 每次尝试换一个出口代理 + 新客户端 (新 cookie/TLS 会话/VQD);
-// 418/429 多是出口被风控, 换出口比原地重试有效.
+// 418/429 多是出口被风控, 换出口比原地重试有效; 被限的出口进冷却, 轮询时跳过.
 func (h *Handler) postDuckChat(request duckgotypes.ApiRequest) (*http.Response, error) {
-	attempts := 3
+	attempts := min(4, max(1, h.proxy.GetIPS()))
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		proxyUrl := h.proxy.GetProxyIP()
@@ -266,25 +265,38 @@ func (h *Handler) postDuckChat(request duckgotypes.ApiRequest) (*http.Response, 
 		token, err := duckgo.InitXVQD(client, proxyUrl)
 		if err != nil {
 			lastErr = err
+			h.proxy.MarkBad(proxyUrl, proxyErrCooldown)
 			log.Printf("[duckgo] attempt %d proxy=%s vqd err: %v", i+1, proxyUrl, err)
 			continue
 		}
 		response, err := duckgo.POSTconversation(client, request, token, proxyUrl)
 		if err != nil {
 			lastErr = err
+			h.proxy.MarkBad(proxyUrl, proxyErrCooldown)
 			log.Printf("[duckgo] attempt %d proxy=%s chat err: %v", i+1, proxyUrl, err)
 			continue
 		}
-		blocked := response.StatusCode == http.StatusTeapot || response.StatusCode == http.StatusTooManyRequests
-		if blocked && i < attempts-1 {
-			log.Printf("[duckgo] attempt %d proxy=%s status=%d, switching proxy", i+1, proxyUrl, response.StatusCode)
+		if response.StatusCode != http.StatusTeapot && response.StatusCode != http.StatusTooManyRequests {
+			return response, nil
+		}
+		h.proxy.MarkBad(proxyUrl, proxyBlockCooldown)
+		log.Printf("[duckgo] attempt %d proxy=%s status=%d, cooling proxy", i+1, proxyUrl, response.StatusCode)
+		if i < attempts-1 {
 			response.Body.Close()
 			continue
 		}
+		// 418 是 DDG 私有语义; 统一回 429 让 New API 等网关按限流重试/切渠道.
+		response.StatusCode = http.StatusTooManyRequests
+		response.Status = "429 Too Many Requests"
 		return response, nil
 	}
 	return nil, lastErr
 }
+
+const (
+	proxyBlockCooldown = 15 * time.Minute // 418/429: 实测同出口 3 分钟以上仍持续 418
+	proxyErrCooldown   = 2 * time.Minute  // 网络/握手错误: 多为节点抖动
+)
 
 func truncateStr(s string, n int) string {
 	if len(s) <= n {
