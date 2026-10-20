@@ -331,17 +331,19 @@ const vqdBrowserPrelude = `
     return child;
   };
   // 内部函数: 匹配属性选择器 meta[http-equiv="..."]
+  // 标签/属性名大小写不敏感, 属性值大小写敏感 (与浏览器一致)
   function matchesAttributeSelector__(el, selector) {
-    var re = /^([a-z0-9_-]+)\[([a-z0-9_-]+)=(["']?)([^"'\]]+)\3\]$/i;
+    var re = /^([a-z0-9_-]+|\*)\[([a-z0-9_-]+)=(["']?)([^"'\]]+)\3\]$/i;
     var m = selector.match(re);
     if (!m) return false;
-    var tag = m[1].toLowerCase(), attr = m[2], val = m[4];
+    var tag = m[1].toLowerCase(), attr = m[2].toLowerCase(), val = m[4];
     if (tag !== "*" && el.tagName && el.tagName.toLowerCase() !== tag) return false;
     return el.getAttribute(attr) === val;
   }
 
   // 内部函数: 递归收集匹配元素
   function collectMatching__(el, matchFn, results) {
+    if (typeof el === "string") return;
     if (matchFn(el)) results.push(el);
     if (el.children && el.children.length > 0) {
       for (var i = 0; i < el.children.length; i++) {
@@ -351,14 +353,16 @@ const vqdBrowserPrelude = `
   }
 
   Element__.prototype.querySelectorAll = function (selector) {
-    selector = String(selector || "").toLowerCase();
+    selector = String(selector || "");
     // 特殊: #jsa
     if (selector === "#jsa" && this.ownerDocument && this.ownerDocument.__jsa__) {
       return new NodeList__([this.ownerDocument.__jsa__]);
     }
-    // 特殊: meta[http-equiv="Content-Security-Policy"]
-    if (selector.indexOf("meta[") === 0) {
-      var results = [];
+    var results = [];
+    if (selector === "*") {
+      collectMatching__(this, function () { return true; }, results);
+      if (results[0] === this) results.shift();
+    } else if (selector.indexOf("[") > 0 || selector.indexOf("[") === 0) {
       if (this.children && this.children.length > 0) {
         for (var i = 0; i < this.children.length; i++) {
           collectMatching__(this.children[i], function(el) {
@@ -366,19 +370,23 @@ const vqdBrowserPrelude = `
           }, results);
         }
       }
-      return new NodeList__(results);
+    } else if (/^[a-z0-9_-]+$/i.test(selector)) {
+      var tag = selector.toLowerCase();
+      collectMatching__(this, function (el) { return el.tagName.toLowerCase() === tag; }, results);
+      if (results[0] === this) results.shift();
     }
-    return new NodeList__([]);
+    return new NodeList__(results);
   };
   Element__.prototype.querySelector = function (selector) {
     var list = this.querySelectorAll(selector);
     return list.length > 0 ? list[0] : null;
   };
   Element__.prototype.getAttribute = function (name) {
-    return this.attributes[String(name)] || null;
+    var key = String(name).toLowerCase();
+    return Object.prototype.hasOwnProperty.call(this.attributes, key) ? this.attributes[key] : null;
   };
   Element__.prototype.setAttribute = function (name, value) {
-    this.attributes[String(name)] = String(value);
+    this.attributes[String(name).toLowerCase()] = String(value);
   };
   Element__.prototype.getBoundingClientRect = function () {
     return { width: 1, height: 1, top: 0, right: 1, bottom: 1, left: 0 };
@@ -415,6 +423,94 @@ const vqdBrowserPrelude = `
     Element__.call(el, tagName);
     return el;
   }
+
+  // ===== innerHTML: 最小 HTML 解析/序列化 =====
+  // 挑战会写入畸形 HTML 并比对 innerHTML.length 与 querySelectorAll("*").length,
+  // 需要与浏览器一样做标签闭合归一化, 例如 "<li><div></li><li></div" ->
+  // "<li><div></div></li><li></li>" (29 字符, 3 个元素).
+  var voidTags__ = {
+    area: 1, base: 1, br: 1, col: 1, embed: 1, hr: 1, img: 1,
+    input: 1, link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1,
+  };
+  function parseHTML__(html, parent) {
+    var stack = [{
+      tagName: "#fragment",
+      children: parent.children,
+      appendChild: function (child) { parent.appendChild(child); },
+    }];
+    var pendingText = "";
+    function flushText__() {
+      if (pendingText) {
+        stack[stack.length - 1].children.push(pendingText);
+        pendingText = "";
+      }
+    }
+    var i = 0;
+    while (i < html.length) {
+      var lt = html.indexOf("<", i);
+      if (lt < 0) { pendingText += html.slice(i); break; }
+      if (lt > i) pendingText += html.slice(i, lt);
+      var gt = html.indexOf(">", lt + 1);
+      if (gt < 0) break;
+      var raw = html.slice(lt + 1, gt).trim();
+      var closing = raw.charAt(0) === "/";
+      var selfClose = raw.charAt(raw.length - 1) === "/";
+      var body = (closing ? raw.slice(1) : raw).replace(/\/$/, "").trim();
+      var name = body.split(/[\s]+/)[0].toLowerCase();
+      if (!name) { i = gt + 1; continue; }
+      if (closing) {
+        for (var k = stack.length - 1; k > 0; k--) {
+          if (stack[k].tagName && stack[k].tagName.toLowerCase() === name) {
+            stack.length = k;
+            break;
+          }
+        }
+      } else {
+        flushText__();
+        var el = createElement__(name);
+        var rest = body.slice(body.indexOf(name) + name.length);
+        var attrRe = /([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>]+)))?/g;
+        var am;
+        while ((am = attrRe.exec(rest))) {
+          var attrName = am[1].toLowerCase();
+          var attrValue = am[2] !== undefined ? am[2] : (am[3] !== undefined ? am[3] : (am[4] !== undefined ? am[4] : ""));
+          el.setAttribute(attrName, attrValue);
+        }
+        stack[stack.length - 1].appendChild(el);
+        if (!selfClose && !voidTags__[name]) stack.push(el);
+      }
+      i = gt + 1;
+    }
+    flushText__();
+  }
+  function serializeNode__(node) {
+    if (typeof node === "string") return node;
+    var tag = node.tagName.toLowerCase();
+    var out = "<" + tag;
+    for (var k in node.attributes) {
+      if (Object.prototype.hasOwnProperty.call(node.attributes, k)) {
+        out += " " + k + '="' + String(node.attributes[k]).replace(/"/g, "&quot;") + '"';
+      }
+    }
+    out += ">";
+    if (voidTags__[tag]) return out;
+    if (node.children) {
+      for (var i = 0; i < node.children.length; i++) out += serializeNode__(node.children[i]);
+    }
+    return out + "</" + tag + ">";
+  }
+  Object.defineProperty(Element__.prototype, "innerHTML", {
+    configurable: true,
+    get: function () {
+      var out = "";
+      for (var i = 0; i < this.children.length; i++) out += serializeNode__(this.children[i]);
+      return out;
+    },
+    set: function (value) {
+      this.children = [];
+      parseHTML__(String(value == null ? "" : value), this);
+    },
+  });
 
   // ===== Document =====
   var docLocation__ = {
