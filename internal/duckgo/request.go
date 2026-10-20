@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,8 +23,7 @@ import (
 )
 
 var (
-	Token     *XqdgToken
-	FEVersion *XqdgToken
+	FEVersion = &XqdgToken{}
 	UA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 )
 
@@ -35,33 +33,25 @@ type XqdgToken struct {
 	ExpireAt time.Time  `json:"expire"`
 }
 
+// InitXVQD 按浏览器顺序走一遍: 打开首页 (拿 cookie/前端版本) -> status 取挑战 -> 本地解.
+// 每次都重新算, 不跨代理/会话复用 token —— 复用或跳过首页会被 duck.ai 直接 418.
 func InitXVQD(client httpclient.AuroraHttpClient, proxyUrl string) (string, error) {
-	if Token == nil {
-		Token = &XqdgToken{
-			Token: "",
-			M:     sync.Mutex{},
-		}
+	if proxyUrl != "" {
+		client.SetProxy(proxyUrl)
 	}
-	Token.M.Lock()
-	defer Token.M.Unlock()
-	if Token.Token == "" {
-		status, err := postStatus(client, proxyUrl)
-		if err != nil {
-			return "", err
-		}
-		defer status.Body.Close()
-		vqdHash := status.Header.Get("x-vqd-hash-1")
-		if vqdHash == "" {
-			return "", errors.New("no x-vqd-hash-1 token")
-		}
-		token, err := GenerateVQDHash(vqdHash)
-		if err != nil {
-			return "", err
-		}
-		Token.Token = token
+	if err := warmSession(client); err != nil {
+		return "", err
 	}
-
-	return Token.Token, nil
+	status, err := postStatus(client, "")
+	if err != nil {
+		return "", err
+	}
+	defer status.Body.Close()
+	vqdHash := status.Header.Get("x-vqd-hash-1")
+	if vqdHash == "" {
+		return "", fmt.Errorf("no x-vqd-hash-1 token (status %d)", status.StatusCode)
+	}
+	return GenerateVQDHash(vqdHash)
 }
 
 func postStatus(client httpclient.AuroraHttpClient, proxyUrl string) (*http.Response, error) {
@@ -69,7 +59,9 @@ func postStatus(client httpclient.AuroraHttpClient, proxyUrl string) (*http.Resp
 		client.SetProxy(proxyUrl)
 	}
 	header := createHeader()
+	delete(header, "content-type")
 	header.Set("accept", "*/*")
+	header.Set("cache-control", "no-store")
 	header.Set("x-vqd-accept", "1")
 	response, err := client.Request(httpclient.GET, "https://duck.ai/duckchat/v1/status", header, nil, nil)
 	if err != nil {
@@ -83,7 +75,8 @@ func POSTconversation(client httpclient.AuroraHttpClient, request duckgotypes.Ap
 		client.SetProxy(proxyUrl)
 	}
 
-	maxRetries := 3
+	// 同一出口 IP 只补一次新 token; 再 418 交给调用方换出口, 原地连打只会把 IP 烧掉.
+	maxRetries := 1
 	var response *http.Response
 	var err error
 
@@ -98,8 +91,7 @@ func POSTconversation(client httpclient.AuroraHttpClient, request duckgotypes.Ap
 		}
 
 		response.Body.Close()
-		ResetXVQD()
-		token, err = InitXVQD(client, proxyUrl)
+		token, err = InitXVQD(client, "")
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +130,8 @@ func Handle_request_error(c *gin.Context, response *http.Response) bool {
 
 func createHeader() httpclient.AuroraHeaders {
 	header := make(httpclient.AuroraHeaders)
-	header.Set("accept-language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+	// 与 vqd.go 里 navigator.language 保持一致
+	header.Set("accept-language", "en-US,en;q=0.9")
 	header.Set("content-type", "application/json")
 	header.Set("origin", "https://duck.ai")
 	header.Set("referer", "https://duck.ai/")
@@ -170,42 +163,71 @@ func postConversationOnce(client httpclient.AuroraHttpClient, request duckgotype
 }
 
 func InitFEVersion(client httpclient.AuroraHttpClient, proxyUrl string) (string, error) {
-	if FEVersion == nil {
-		FEVersion = &XqdgToken{
-			Token: "",
-			M:     sync.Mutex{},
-		}
+	fe := feVersionCache()
+	fe.M.Lock()
+	if fe.Token != "" && fe.ExpireAt.After(time.Now()) {
+		defer fe.M.Unlock()
+		return fe.Token, nil
 	}
-	FEVersion.M.Lock()
-	defer FEVersion.M.Unlock()
-	if FEVersion.Token != "" && FEVersion.ExpireAt.After(time.Now()) {
-		return FEVersion.Token, nil
-	}
+	fe.M.Unlock()
 
 	if proxyUrl != "" {
 		client.SetProxy(proxyUrl)
 	}
-	header := createHeader()
-	header.Set("accept", "text/html")
+	if err := warmSession(client); err != nil {
+		return "", err
+	}
+	fe.M.Lock()
+	defer fe.M.Unlock()
+	return fe.Token, nil
+}
+
+func feVersionCache() *XqdgToken {
+	if FEVersion == nil { // 测试里可能手动置空
+		FEVersion = &XqdgToken{}
+	}
+	return FEVersion
+}
+
+// warmSession 以浏览器导航的方式打开 duck.ai 首页: 让 cookie jar 拿到会话 cookie,
+// 顺便刷新 x-fe-version 缓存.
+func warmSession(client httpclient.AuroraHttpClient) error {
+	header := httpclient.AuroraHeaders{
+		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+		"accept-language":           "en-US,en;q=0.9",
+		"priority":                  "u=0, i",
+		"sec-ch-ua":                 `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"`,
+		"sec-ch-ua-mobile":          "?0",
+		"sec-ch-ua-platform":        `"Windows"`,
+		"sec-fetch-dest":            "document",
+		"sec-fetch-mode":            "navigate",
+		"sec-fetch-site":            "none",
+		"sec-fetch-user":            "?1",
+		"upgrade-insecure-requests": "1",
+		"user-agent":                UA,
+	}
 	response, err := client.Request(httpclient.GET, "https://duck.ai/", header, nil, nil)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return "", err
+		return err
 	}
 	versionTagMatch := regexp.MustCompile(`data-version-tag="([^"]+)"`).FindSubmatch(body)
 	versionShaMatch := regexp.MustCompile(`data-version-sha="([^"]+)"`).FindSubmatch(body)
 	if len(versionTagMatch) < 2 || len(versionShaMatch) < 2 {
-		return "", errors.New("duck.ai version metadata not found")
+		return fmt.Errorf("duck.ai version metadata not found (status %d)", response.StatusCode)
 	}
 
-	FEVersion.Token = fmt.Sprintf("%s-%s", versionTagMatch[1], versionShaMatch[1])
-	FEVersion.ExpireAt = time.Now().Add(30 * time.Minute)
-	return FEVersion.Token, nil
+	fe := feVersionCache()
+	fe.M.Lock()
+	defer fe.M.Unlock()
+	fe.Token = fmt.Sprintf("%s-%s", versionTagMatch[1], versionShaMatch[1])
+	fe.ExpireAt = time.Now().Add(30 * time.Minute)
+	return nil
 }
 
 func CreateFESignals() string {
@@ -260,14 +282,8 @@ func RandomHex(byteLength int) string {
 	return hex.EncodeToString(buffer)
 }
 
-func ResetXVQD() {
-	if Token == nil {
-		return
-	}
-	Token.M.Lock()
-	defer Token.M.Unlock()
-	Token.Token = ""
-}
+// ResetXVQD 保留给旧调用方; token 已不再缓存, 每次 InitXVQD 都会重新取.
+func ResetXVQD() {}
 
 func ReadResponseError(response *http.Response) error {
 	var errorResponse map[string]interface{}

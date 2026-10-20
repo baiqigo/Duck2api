@@ -232,6 +232,7 @@ const vqdBrowserPrelude = `
 (function () {
   "use strict";
   var userAgent__ = __goUserAgent;
+  var pageStart__ = Date.now() - 1500 - Math.floor(Math.random() * 3000);
 
   // ===== TextEncoder =====
   function TextEncoder__() {}
@@ -517,7 +518,7 @@ const vqdBrowserPrelude = `
     getComputedStyle: function (el) { return el && el.style ? el.style : { getPropertyValue: function () { return ""; }, cssText: "" }; },
     screen: { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24, pixelDepth: 24 },
     crypto: { subtle: { digest: function () { return Promise.resolve(new ArrayBuffer(32)); } } },
-    performance: { now: function () { var t = Date.now(); return t % 1000 + Math.random(); } },
+    performance: { now: function () { return Date.now() - pageStart__ + Math.random(); } },
     console: { log: function () {}, warn: function () {}, error: function () {}, info: function () {}, debug: function () {} },
     __jsaCallbacks__: {},
     // === Window identity checks ===
@@ -577,10 +578,10 @@ const vqdBrowserPrelude = `
   defProp__(globalThis, "setInterval", function () { return 0; });
   defProp__(globalThis, "clearInterval", function () {});
   defProp__(globalThis, "performance", {
-    now: function () { var t = Date.now(); return t % 1000 + Math.random(); },
-    timing: { navigationStart: Date.now() - 1000 },
+    now: function () { return Date.now() - pageStart__ + Math.random(); },
+    timing: { navigationStart: pageStart__ },
     memory: { jsHeapSizeLimit: 2172649472, totalJSHeapSize: 10000000, usedJSHeapSize: 8000000 },
-    timeOrigin: Date.now() - 1000,
+    timeOrigin: pageStart__,
   });
   defProp__(globalThis, "crypto", {
     subtle: { digest: function () { return Promise.resolve(new ArrayBuffer(32)); } },

@@ -22,11 +22,20 @@ func NewStdClient() *TlsClient {
 		tls_client.WithCookieJar(tls_client.NewCookieJar()),
 		tls_client.WithRandomTLSExtensionOrder(),
 		tls_client.WithTimeoutSeconds(600),
-		tls_client.WithClientProfile(profiles.Okhttp4Android13),
+		tls_client.WithClientProfile(profiles.Chrome_146),
 	}...)
 
 	stdClient := &TlsClient{Client: client}
 	return stdClient
+}
+
+// chromeHeaderOrder 是 Chrome 发 fetch/导航请求时的头顺序; 未列出的头排在后面.
+var chromeHeaderOrder = []string{
+	"content-length", "cache-control", "sec-ch-ua-platform", "x-vqd-hash-1", "x-fe-version",
+	"x-fe-signals", "x-ddg-journey-id", "x-vqd-accept", "user-agent", "sec-ch-ua", "content-type",
+	"sec-ch-ua-mobile", "upgrade-insecure-requests", "accept", "origin", "sec-fetch-site",
+	"sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest", "referer", "accept-encoding",
+	"accept-language", "cookie", "priority",
 }
 
 func convertResponse(resp *fhttp.Response) *http.Response {
@@ -85,6 +94,7 @@ func (t *TlsClient) Request(method httpclient.HttpMethod, url string, headers ht
 	}
 	t.handleHeaders(req, headers)
 	t.handleCookies(req, cookies)
+	req.Header[fhttp.HeaderOrderKey] = chromeHeaderOrder
 	if t.ReqBefore != nil {
 		if err := t.ReqBefore(req); err != nil {
 			return nil, err

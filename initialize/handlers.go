@@ -239,13 +239,6 @@ func (h *Handler) responses(c *gin.Context) {
 }
 
 func (h *Handler) startDuckDuckGoRequest(originalRequest officialtypes.APIRequest) (duckgotypes.ApiRequest, *http.Response, error) {
-	proxyUrl := h.proxy.GetProxyIP()
-	client := bogdanfinn.NewStdClient()
-	token, err := duckgo.InitXVQD(client, proxyUrl)
-	if err != nil {
-		return duckgotypes.ApiRequest{}, nil, err
-	}
-
 	reasoningEffort := originalRequest.ReasoningEffort
 	webSearch := originalRequest.WebSearch != nil && *originalRequest.WebSearch
 
@@ -255,11 +248,42 @@ func (h *Handler) startDuckDuckGoRequest(originalRequest officialtypes.APIReques
 	reqJSON, _ := json.Marshal(translatedRequest)
 	log.Printf("[DEBUG] DuckDuckGo request: %s", truncateStr(string(reqJSON), 2000))
 
-	response, err := duckgo.POSTconversation(client, translatedRequest, token, proxyUrl)
+	response, err := h.postDuckChat(translatedRequest)
 	if err != nil {
 		return duckgotypes.ApiRequest{}, nil, err
 	}
 	return translatedRequest, response, nil
+}
+
+// postDuckChat 每次尝试换一个出口代理 + 新客户端 (新 cookie/TLS 会话/VQD);
+// 418/429 多是出口被风控, 换出口比原地重试有效.
+func (h *Handler) postDuckChat(request duckgotypes.ApiRequest) (*http.Response, error) {
+	attempts := 3
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		proxyUrl := h.proxy.GetProxyIP()
+		client := bogdanfinn.NewStdClient()
+		token, err := duckgo.InitXVQD(client, proxyUrl)
+		if err != nil {
+			lastErr = err
+			log.Printf("[duckgo] attempt %d proxy=%s vqd err: %v", i+1, proxyUrl, err)
+			continue
+		}
+		response, err := duckgo.POSTconversation(client, request, token, proxyUrl)
+		if err != nil {
+			lastErr = err
+			log.Printf("[duckgo] attempt %d proxy=%s chat err: %v", i+1, proxyUrl, err)
+			continue
+		}
+		blocked := response.StatusCode == http.StatusTeapot || response.StatusCode == http.StatusTooManyRequests
+		if blocked && i < attempts-1 {
+			log.Printf("[duckgo] attempt %d proxy=%s status=%d, switching proxy", i+1, proxyUrl, response.StatusCode)
+			response.Body.Close()
+			continue
+		}
+		return response, nil
+	}
+	return nil, lastErr
 }
 
 func truncateStr(s string, n int) string {
@@ -433,22 +457,10 @@ func (h *Handler) imageGenerations(c *gin.Context) {
 		Stream: false,
 	}
 
-	proxyUrl := h.proxy.GetProxyIP()
-	client := bogdanfinn.NewStdClient()
-	token, err := duckgo.InitXVQD(client, proxyUrl)
-	if err != nil {
-		c.JSON(500, gin.H{"error": gin.H{
-			"message": "Failed to initialize VQD token",
-			"type":    "internal_server_error",
-			"code":    err.Error(),
-		}})
-		return
-	}
-
 	translatedRequest := duckgoConvert.ConvertAPIRequestWithOptions(chatReq, req.ReasoningEffort, false)
 	translatedRequest.Metadata.ToolChoice.GenerateImage = true
 
-	response, err := duckgo.POSTconversation(client, translatedRequest, token, proxyUrl)
+	response, err := h.postDuckChat(translatedRequest)
 	if err != nil {
 		c.JSON(500, gin.H{"error": gin.H{
 			"message": "Failed to generate image",
@@ -604,22 +616,10 @@ func (h *Handler) doImageEdit(c *gin.Context, prompt string, model string, image
 		Stream: false,
 	}
 
-	proxyUrl := h.proxy.GetProxyIP()
-	client := bogdanfinn.NewStdClient()
-	token, err := duckgo.InitXVQD(client, proxyUrl)
-	if err != nil {
-		c.JSON(500, gin.H{"error": gin.H{
-			"message": "Failed to initialize VQD token",
-			"type":    "internal_server_error",
-			"code":    err.Error(),
-		}})
-		return
-	}
-
 	translatedRequest := duckgoConvert.ConvertAPIRequestWithOptions(chatReq, reasoningEffort, false)
 	translatedRequest.Metadata.ToolChoice.GenerateImage = true
 
-	response, err := duckgo.POSTconversation(client, translatedRequest, token, proxyUrl)
+	response, err := h.postDuckChat(translatedRequest)
 	if err != nil {
 		c.JSON(500, gin.H{"error": gin.H{
 			"message": "Failed to edit image",
