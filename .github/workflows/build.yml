@@ -4,12 +4,34 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v2.1.8"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run offline tests
+        run: go test ./util ./internal/proxys ./internal/duckgo ./initialize
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -23,6 +45,8 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: amd64
+          - goos: darwin
+            goarch: arm64
           - goos: freebsd
             goarch: amd64
     steps:
@@ -35,44 +59,63 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binary
+      - name: Build archive
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-          TAG: ${{ github.ref_name }}
-        shell: bash
+          CGO_ENABLED: "0"
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          version="${TAG#v}"
-          artifact="duck2api-${version}-${GOOS}-${GOARCH}"
-          mkdir -p "${artifact}"
-          output="duck2api"
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          name="duck2api-${version}-${GOOS}-${GOARCH}"
+          stable="duck2api-${GOOS}-${GOARCH}"
+          mkdir -p "dist/${name}"
+          bin="duck2api"
           if [ "${GOOS}" = "windows" ]; then
-            output="duck2api.exe"
+            bin="duck2api.exe"
           fi
-          go build -trimpath -ldflags="-s -w" -o "${artifact}/${output}" .
-          tar -czf "${artifact}.tar.gz" "${artifact}"
+          go build -trimpath -ldflags="-s -w" -o "dist/${name}/${bin}" .
+          cp README.md API.md env.template docker-compose.yml LICENSE "dist/${name}/"
+          if [ "${GOOS}" = "windows" ]; then
+            (cd "dist/${name}" && zip -q -r "../${name}.zip" .)
+            cp "dist/${name}.zip" "dist/${stable}.zip"
+          else
+            tar -C "dist/${name}" -czf "dist/${name}.tar.gz" .
+            cp "dist/${name}.tar.gz" "dist/${stable}.tar.gz"
+          fi
+          rm -rf "dist/${name}"
 
-      - name: Upload artifact
+      - name: Upload archives
         uses: actions/upload-artifact@v4
         with:
-          name: duck2api-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: duck2api-*-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          name: duck2api-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: error
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
+      - name: Download archives
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create release
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          files: dist/*.tar.gz
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: Duck2API ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: dist/*

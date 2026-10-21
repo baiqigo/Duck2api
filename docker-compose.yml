@@ -1,9 +1,20 @@
-version: '3'
-
 services:
-  app:
-    image: ghcr.io/aurora-develop/duck2api:latest
+  duck2api:
+    image: ghcr.io/baiqigo/duck2api:latest
     container_name: duck2api
     restart: unless-stopped
     ports:
-      - '8080:8080'
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      Authorization: ${Authorization:-}
+      PROXY_URL: ${PROXY_URL:-}
+      PREFIX: ${PREFIX:-}
+      TLS_CERT: ${TLS_CERT:-}
+      TLS_KEY: ${TLS_KEY:-}
+      FREE_ACCOUNTS: ${FREE_ACCOUNTS:-true}
+      FREE_ACCOUNTS_NUM: ${FREE_ACCOUNTS_NUM:-1024}
+    # 需要代理池时，把 proxies.txt 放到本文件同目录并取消下面注释。
+    # volumes:
+    #   - ./proxies.txt:/app/proxies.txt:ro

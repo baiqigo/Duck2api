@@ -7,32 +7,58 @@ curl 示例请查看：[API.md](API.md)
 
 ## 部署
 
-### 编译部署
+推荐直接用 Docker 镜像，不需要安装 Go、Node 或浏览器。
 
-```bash
-git clone https://github.com/aurora-develop/duck2api
-cd duck2api
-go build -o duck2api
-chmod +x ./duck2api
-./duck2api
-```
-
-### Docker 部署
+### 方式一：Docker 一键启动（推荐）
 
 ```bash
 docker run -d \
   --name duck2api \
+  --restart unless-stopped \
   -p 8080:8080 \
-  ghcr.io/aurora-develop/duck2api:latest
+  -e Authorization=你的访问密钥 \
+  ghcr.io/baiqigo/duck2api:latest
 ```
 
-### Docker Compose 部署
+不设置 `Authorization` 时服务开放访问；公网部署时建议设置。
+
+### 方式二：Docker Compose
 
 ```bash
 mkdir duck2api && cd duck2api
-wget https://raw.githubusercontent.com/aurora-develop/duck2api/main/docker-compose.yml
-docker-compose up -d
+curl -fsSLO https://raw.githubusercontent.com/baiqigo/Duck2api/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/baiqigo/Duck2api/main/env.template
+cp env.template .env
+# 编辑 .env，至少设置 Authorization
+docker compose up -d
 ```
+
+### 方式三：下载预编译二进制
+
+Linux / macOS：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baiqigo/Duck2api/main/install.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/baiqigo/Duck2api/main/install.ps1 | iex
+```
+
+也可以从 [Releases](https://github.com/baiqigo/Duck2api/releases) 手动下载对应系统的压缩包，解压后运行 `duck2api`。
+
+### 方式四：源码编译
+
+```bash
+git clone https://github.com/baiqigo/Duck2api
+cd Duck2api
+go build -o duck2api .
+./duck2api
+```
+
+> 首次使用 GHCR 镜像时，如果 `docker pull` 提示无权限，请在 GitHub 仓库的 Packages 页面把 `duck2api` 包可见性改为 Public。
 
 ## 功能概览
 

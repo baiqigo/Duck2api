@@ -1,31 +1,27 @@
-# 使用 Go 1.25 官方镜像作为构建环境
 FROM golang:1.26 AS builder
 
-# 禁用 CGO
-ENV CGO_ENABLED=0
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 
-# 设置工作目录
+ENV CGO_ENABLED=0
 WORKDIR /app
 
-# 复制 go.mod 和 go.sum 并下载依赖
 COPY go.mod go.sum ./
 RUN go mod download
 
-# 复制源代码并构建应用
 COPY . .
-RUN go build -ldflags "-s -w" -o /app/duck2api .
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /app/duck2api .
 
-# 使用 Alpine Linux 作为最终镜像
-FROM alpine:latest
+FROM alpine:3.22
 
-# 设置工作目录
 WORKDIR /app
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 
-# 从构建阶段复制编译好的应用和资源
 COPY --from=builder /app/duck2api /app/duck2api
 
-# 暴露端口
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/ping >/dev/null || exit 1
 
 CMD ["/app/duck2api"]

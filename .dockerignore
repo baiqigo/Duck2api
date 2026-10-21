@@ -1,0 +1,9 @@
+.git
+.github
+bin
+target
+dist
+*.exe
+*.tar.gz
+*.zip
+.env
