@@ -18,7 +18,8 @@ Write-Host "Downloading $base/$asset"
 Invoke-WebRequest -Uri "$base/$asset" -OutFile $zip
 
 $checksums = Invoke-WebRequest -Uri "$base/checksums.txt" -UseBasicParsing
-$line = ($checksums.Content -split "`r?`n" | Where-Object { $_ -match "  $([regex]::Escape($asset))$" } | Select-Object -First 1)
+$checksumText = [System.Text.Encoding]::UTF8.GetString($checksums.Content)
+$line = ($checksumText -split "`r?`n" | Where-Object { $_ -match "  $([regex]::Escape($asset))$" } | Select-Object -First 1)
 if (-not $line) { throw "checksum for $asset not found" }
 $expected = ($line -split '\s+')[0]
 $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash
